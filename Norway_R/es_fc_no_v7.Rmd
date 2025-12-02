@@ -825,9 +825,12 @@ plot(ratio_contn,colNA="grey40",main = "Ratio of upstream runoff retained (conti
 writeRaster(ratio_agric,file.path(rfp,"ratio_agric.tif"),overwrite=T)
 writeRaster(ratio_artif,file.path(rfp,"ratio_artif.tif"),overwrite=T)
 writeRaster(ratio_natur,file.path(rfp,"ratio_natur.tif"),overwrite=T)
-writeRaster(ratio_contn,file.path(rfp,"ratio_contn.tif"),overwrite=T)
+# for ration contn we make a lighter version
+ratio_contn_3d <- round(ratio_contn,digits=3)
+writeRaster(ratio_contn_3d,file.path(rfp,"ratio_contn_3d.tif"),overwrite=T)
 ## clean up
 #rm(flow_acc_total,flowdir_total)
+rm(ratio_contn_1d)
 gc()
 ```
 
