@@ -1428,11 +1428,22 @@ lcm_idf$es_type[lcm_idf$landcover_id %in% c(910)]<-estv[9] # lakes
 # category 10 doesn't exist
 lcm_idf$es_type[lcm_idf$landcover_id %in% c(1100)]<-estv[11] # coastal
 lcm_idf$es_type[lcm_idf$landcover_id %in% c(1200)]<-estv[12] # marine inlets
-# make it a factor
-#lcm_idf$es_type<-as.factor(lcm_idf$es_type)
-#lcm_idf$es_type[lcm_idf$landcover_id %in% c(9900)]<-estv[12] # marine ecosystems
-# Call it lcm5, which follows the required classification
-lcm5 <- terra::subst(lcm2,lcm_idf$landcover_id,lcm_idf$es_type)
+# make a numeric identifier also
+lcm_idf$es_id <- match(lcm_idf$es_type, unique(estv))
+# then add to raster
+lev <- levels(lcm)[[1]]
+lev$es_id <- lcm_idf$es_id[
+  match(lev$Value, lcm_idf$landcover_id)
+]
+lev$es_type <- lcm_idf$es_type[
+  match(lev$Value, lcm_idf$landcover_id)
+]
+lcm5<-lcm
+levels(lcm5) <- lev
+# so here we can set which category we want to plot. 
+# Can always see which categories we have available by calling cats(lcm)
+activeCat(lcm5) <- "es_type"
+rm(lev)
 terra::plot(lcm5, main="Grunnkartet translated to SUT categories")
 # clean up
 rm(lcm2)
