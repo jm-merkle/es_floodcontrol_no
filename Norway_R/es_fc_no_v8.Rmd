@@ -17,7 +17,7 @@ table {
 
 Magnus Merkle (SSB), with Marte Lindseth (SSB), Erik Stange (NINA), Lavinia Svae (SSB) and Trine Randen (SSB) 
 
-Naturregnskapsprosjekt, 23. September 2026
+Naturregnskapsprosjekt, 25. September 2026
 
 \
 
@@ -26,7 +26,8 @@ Naturregnskapsprosjekt, 23. September 2026
 Changes since version 7:
 
 -   Changed population input from 2020 to an interpolation between 2020 and 2025
--   Minor fix in LCM category translation
+-   Minor fix in LCM category translation and simplified code
+-   SPA thresholds changed to be based on Norwegian Grunnkart categories
 
 # Abstract and Limitation
 
@@ -182,6 +183,8 @@ Read in and plot our land cover categories.
 ```{r,message = FALSE, results = 'hide', fig.height = 9}
 gc()
 # read Norway Grunnkart (this is our reference LCM) ----------------------------
+# this is factor data. If you run cats(lcm) you see there are two columns in it
+#, first "Value" (which is category code) and then "Class" (which is category name)
 lcm<-terra::rast(file.path(dfp,"Norway_files","Grunnkart","Grunnkart_OT.tif"))
 terra::plot(lcm, main="Norwegian Land Cover Map (Grunnkart)")
 ```
@@ -189,10 +192,6 @@ terra::plot(lcm, main="Norwegian Land Cover Map (Grunnkart)")
 Now the fact of the matter is that the categories used in the Norwegian LCM do not perfectly correspond to the categories used in the curve number table. Therefore we first need to translate the Norwegian categories into the system used in the CORINE data. Note we treat the sea as NA because  it is not relevant for flood control. 
 ```{r,message = FALSE, results = 'hide', fig.height = 9}
 gc()
-# make a numeric version of the lcm --------------------------------------------
-lcm2<-lcm
-activeCat(lcm2) <- "Value"
-lcm2<-as.numeric(lcm2)
 # read in grunnkart lookup -----------------------------------------------------
 lcm_idf<-read.csv(file.path(dfp,"Norway_files","Grunnkart",
                             "Lookup_grunnkart.csv"))
@@ -230,12 +229,21 @@ lcm_idf$CN_cover_id[lcm_idf$landcover_id == 1200] <- NA # NA 523 in cn lookup (s
 lcm_idf <- rbind(lcm_idf,c(NA,9900,"unclassified","uklassifisert",NA))
 lcm_idf$landcover_id <- as.numeric(lcm_idf$landcover_id)
 lcm_idf$CN_cover_id  <- as.numeric(lcm_idf$CN_cover_id)
-# make a new lcm that features the CN_cover_id
-# numeric version
-lcm4 <- terra::subst(lcm2,lcm_idf$landcover_id,lcm_idf$CN_cover_id)
-# categorical version
-lcm3<-as.factor(lcm4)
-terra::plot(lcm3, main="Grunnkartet translated to CORINE LCM categories")
+# Add CN_cover_id as a category to lcm
+# extract categories
+x <- cats(lcm)[[1]]
+# match with CN categories using lookups
+x$CN_cover_id <- lcm_idf$CN_cover_id[match(x$Value, lcm_idf$landcover_id)]
+# overwrite levels with the version that includes CN categories
+levels(lcm) <- x
+# set CN category as active for the plot
+activeCat(lcm) <- "CN_cover_id"
+# plot
+terra::plot(lcm, main="Grunnkartet translated to CORINE LCM categories (used by CN table)")
+# make our original land classes the active category again
+activeCat(lcm)<-"Class"
+# clean up
+rm(x)
 gc()
 ```
 
@@ -253,8 +261,7 @@ soilsd<-terra::rast(file.path(dfp,"version_2_2","inca_input_floodcontrol",
 # mm comment: the soils data is masked in a weird way in the north of Norway. 
 # I think we should really use something better here.
 # first crop and mask soils ----------------------------------------------------
-soilsd<-crop(soilsd,lcm)
-soilsd<-mask(soilsd,lcm)
+soilsd<-crop(soilsd,lcm,mask=T)
 terra::plot(soilsd, main="INCA default hydrological soil type masked to Norway")
 # mm comment: so here you see again how the soil map is weirdly masked in the 
 # north. comes from the input data. To be sorted out later
@@ -268,27 +275,30 @@ los1<-terra::vect(file.path(dfp,"Norway_files","Losmasse","Losmasse","LosmasseFl
 los2<-terra::vect(file.path(dfp,"Norway_files","Losmasse","Losmasse","LosmasseFlate_20240622.shp"))
 gc()
 # reproject
-los1p <- terra::project(los1,lcm3)
-los2p <- terra::project(los2,lcm3)
-los1r<-terra::rasterize(los1p,lcm3,field = "infilt",fun="mean")
-los2r<-terra::rasterize(los2p,lcm3,field = "infilt",fun="mean")
+los1p <- terra::project(los1,lcm)
+los2p <- terra::project(los2,lcm)
+los1r<-terra::rasterize(los1p,lcm,field = "infilt",fun="mean")
+los2r<-terra::rasterize(los2p,lcm,field = "infilt",fun="mean")
 # The two maps look like they are complements to each other, so we add them together.
 soilsu <- sum(los1r,los2r,na.rm=T)
-soilsu <- terra::mask(soilsu,lcm3)
+soilsu <- terra::mask(soilsu,lcm)
 rm(los1,los2,los1p,los2p,los1r,los2r)
 # And then the plot
 # Generate default viridis colors
 mod_colors <- viridis(4)
 # Replace category 5 with red
 mod_colors[5] <- "red"
+# remove the sea
+soilsu[lcm %in% c(1200,9900)]<-NA
+#plot
 terra::plot(soilsu, col=mod_colors,main="Hydrological soil type for Norway",sub="Note category 5 means no data available")
 gc()
 ```
 
-So in the above map everything that is red is missing data. The way we fix is is to first compute the correlation between soil type and land cover, and then fill the gaps (areas with soil type == 5) by the "most likely" soil type, given land cover.
+So in the above map everything that is red is missing data. The way we fix this is to first compute the correlation between soil type and land cover, and then fill the gaps (areas with soil type == 5) by the "most likely" soil type, given land cover.
 ```{r,message = FALSE, results = 'hide', fig.height = 9}
 gc()
-# first we convert our maps into vectors and bind them in a table
+# then we convert our maps into vectors and bind them in a table
 corrdf<-as.data.frame(cbind(values(lcm),values(soilsu)))
 # then compute the "most likely" soilype for each land cover
 most_likely <- corrdf %>%
@@ -302,12 +312,13 @@ most_likely <- corrdf %>%
   ungroup() %>%
   rename(most_likely_soil = infilt)
 # so then we make a map with the most likely soil type
-mlsoil<-terra::classify(lcm,most_likely[,1:2])
-mlsoil[mlsoil %in% c(1200,9900)]<-NA
+mlsoil<-terra::classify(lcm,most_likely[,c("Class", "most_likely_soil")])
 # and then we replace category 5 in our soils map with the most likely soil type.
 soils<-soilsu
 soils[soils==5]<-mlsoil[soils==5]
+# plot
 terra::plot(soils, main="Adjusted hydrological soil type for Norway",sub="missing areas filled with estimated values")
+# clean up
 rm(soilsd,soilsu,corrdf,mlsoil,most_likely)
 gc()
 ```
@@ -320,23 +331,23 @@ So this is now basically a lookup exercise. My approach is to vectorise the rast
 ```{r,message = FALSE, results = 'hide', fig.height = 9}
 gc()
 # extract data vectors
-#lcmv <-extr_lvl_from_raster_lyr(lcm3,"value")
-lcmv<-values(lcm3)[,1]
-soilsv <-extr_lvl_from_raster_lyr(soils,"infilt")
+lut <- cats(lcm)[[1]]
+cnv <- lut$CN_cover_id[match(values(lcm)[,1], lut$Value)]
+soilsv<-values(soils)[,1]
 # put into a dataframe
-dfc<-as.data.frame(matrix(NA,nrow=length(lcmv),ncol=2))
+dfc<-as.data.frame(matrix(NA,nrow=length(cnv),ncol=2))
 colnames(dfc)<-c("lcmd","soilsd")
-dfc$lcmd <- as.numeric(lcmv)
-dfc$soilsd <- soilsv
+dfc$lcmd <- as.integer(cnv)
+dfc$soilsd <- as.integer(soilsv)
 # join with CN lookup table
 dfc <- dfc %>% left_join(cn_idf,by = join_by(lcmd == landcover_id,soilsd == Soil))
 # then make a raster from the vector
-cnm <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+cnm <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 values(cnm)<-dfc$CN
 # plot result
-terra::plot(cnm, range=c(0,100), main="Norway Curve Number Map", sub="High number implies high runoff, low number implies low runoff")
+terra::plot(cnm, range=c(0,100),main="Norway Curve Number Map", sub="High number implies high runoff, low number implies low runoff",)
 # clean up ---------------------------------------------------------------------
-rm(dfc,soils,lcmv,soilsv)
+rm(dfc,soils,cnv,soilsv,lut)
 gc()
 ```
 
@@ -355,6 +366,8 @@ imp <- terra::rast(file.path(dfp,"version_2_2","inca_input_floodcontrol",
                              "IMD_2018_100m_eu_03035_V2_0_INCA_100m_EPSG3035.tif"))
 # first crop and mask to Norway
 imp<-crop(imp,lcm,mask=T)
+#remove the sea (because there we have impervious dens values >100)
+imp[lcm %in% c(9900,1200)]<-NA
 terra::plot(imp, main="Impervious Density Norway")
 ```
 
@@ -362,10 +375,10 @@ The modification process for imperviousness follows an equation that comes from 
 ```{r, message = FALSE, results = 'hide', fig.width = 12}
 cnmi <- 98*(imp/100) + (1-(imp/100))*cnm
 # make a stack
-cnm1 <- c(cnm,cnmi)
-names(cnm1)<-c("CN","CN Adjusted 1")
+cnms <- c(cnm,cnmi)
+names(cnms)<-c("CN","CN Adjusted 1")
 # plot for Oslo area
-terra::plot(cnm1,range=c(0,100),ext = c(4200000,4400000,4000000,4200000),maxcell=ncell(lcm3))
+terra::plot(cnms,range=c(0,100),ext = c(4200000,4400000,4000000,4200000),maxcell=ncell(lcm))
 # clean up
 rm(imp,cnmi,cnm)
 gc()
@@ -378,19 +391,17 @@ We use the INCA default DEM and Slope maps, cropped and masked to Norway. The mo
 slop <- terra::rast(file.path(dfp,"version_2_2","inca_input_floodcontrol",
                              "DEM_and_Slope_maps",
                              "dt1_slope_INCA_EPSG3035_100m_Byte.tif"))
-slop<-crop(slop,lcm)
-slop<-mask(slop,lcm)
+slop<-crop(slop,lcm,mask=T)
 plot(slop, main="Slope Norway [expressed in %")
 ```
 
 Our data provides slopes in percent. The equation stated in the guidance note based on Huang et al 2016 requires slopes as ratio (ratio = percent/100). Zero slope is NA in the data, so I first turn all NA to zero before running the process. Then apply the formula as stated in the guidance note.  Note: This adjustment process increases the CN number for cells that have a steep slope. Finally, we make a plot to see what difference the operation makes. All in all the differences are very small and we need to zoom in a lot to see anything. The example area provided below is close to Åndalsnes.
 ```{r, message = FALSE, results = 'hide', fig.width = 12}
 slop[is.na(slop)]<-0
-cnma <- cnm1[['CN Adjusted 1']] * ((322.79 + (15.63*slop/100))/((slop/100)+323.52))
-cnm2<-c(cnm1,cnma)
-names(cnm2)<-c("CN","CN Adjusted 1","CN Adjusted 1_2")
-plot(cnm2[[c(2,3)]],range=c(0,100),ext = c(4200000,4210000,4370000,4380000),maxcell=ncell(lcm3))
-rm(slop,cnma,cnm1)
+cnma <- cnms[['CN Adjusted 1']] * ((322.79 + (15.63*slop/100))/((slop/100)+323.52))
+cnms[['CN Adjusted 1_2']]<-cnma
+plot(cnms[[c(2,3)]],range=c(0,100),ext = c(4200000,4210000,4370000,4380000),maxcell=ncell(lcm))
+rm(slop,cnma)
 gc()
 ```
 
@@ -405,10 +416,9 @@ rip <- terra::rast(file.path(dfp,"version_2_2","inca_input_floodcontrol",
 
 
 # first crop and mask to Norway
-rip<-crop(rip,lcm)
-rip<-mask(rip,lcm)
+rip<-crop(rip,lcm,mask=T)
 # to make it better visible
-rip[is.na(rip) & !is.na(lcm3)]<-0
+rip[is.na(rip) & !is.na(lcm)]<-0
 # plot
 plot(rip,main="Riparian Zones Norway")
 ```
@@ -424,17 +434,15 @@ lcm_idf$rip_relevant[lcm_idf$CN_cover_id %in% relevant_codes]<-1
 # now for those cells where we are in a relevant riparian zone we will attribute
 # the lowest possible cn number for the respective land cover. 
 # get vector of rip
-ripv <- extr_lvl_from_raster_lyr(rip,"RiparianZonesEU_INCA_EPSG3035")
-# get vector of lcm
-lcmv <- values(lcm3)[,1]
-lcmv <-as.numeric(lcmv)
-# get vector of CN
-cnv <- extr_lvl_from_raster_lyr(cnm2,"CN Adjusted 1_2")
+ripv<-values(rip)[,1]
+lut <- cats(lcm)[[1]]
+icnv <- lut$CN_cover_id[match(values(lcm)[,1], lut$Value)]
+acnv<-values(cnms[["CN Adjusted 1_2"]])[,1]
 # relevant rip lcmv
-dfc<-as.data.frame(matrix(NA,ncol=3,nrow=length(lcmv)))
+dfc<-as.data.frame(matrix(NA,ncol=3,nrow=length(acnv)))
 colnames(dfc)<-c("lcm","rip","relevant")
 #first the land cover data
-dfc$lcm <- lcmv
+dfc$lcm <- icnv
 #then the riparian zone data
 dfc$rip <- ripv
 # then the relevant cells
@@ -444,12 +452,12 @@ dfc <- dfc %>%
   left_join(cn_idf %>% filter(Soil==1) %>% select(-Soil),by = join_by(lcm == landcover_id)) %>%
   rename(CN1 = CN)
 #clean up
-rm(rip,ripv,lcmv)
+rm(rip,ripv,icnv,lut)
 dfc <- dfc %>% select(-c(lcm,rip))
 gc()
 #then get the cn number for each cell
-dfc['CNIS'] <- cnv
-rm(cnv)
+dfc['CNIS'] <- acnv
+rm(acnv)
 #adjusted CN is the lowest CN
 dfc['CNISR'] <- dfc$CN1
 gc()
@@ -457,13 +465,12 @@ gc()
 dfc$CNISR[is.na(dfc$relevant)] <- dfc$CNIS[is.na(dfc$relevant)]
 gc()
 # then make a new raster
-cnma <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+cnma <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 values(cnma)<-dfc$CNISR
-names(cnma)<-c("CN Adjusted 1_2_3")
 # then stack with our other 
-cnm2 <- c(cnm2,cnma)
+cnms[['CN Adjusted 1_2_3']]<-cnma
 # and plot where we can see something
-plot(cnm2[[c(3,4)]],range=c(0,100),ext = c(4325000,4335000,4115000,4125000),maxcell=ncell(lcm3))
+plot(cnms[[c(3,4)]],range=c(0,100),ext = c(4325000,4335000,4115000,4125000),maxcell=ncell(lcm))
 # clean up
 rm(dfc,relevant_codes,cnma)
 gc()
@@ -476,9 +483,9 @@ That was it for adjustments. The exercise might be more precise if we could get 
 We just need to reverse the scale of the CN map for this. So that a high number implies that water is absorbed, and a low number implies that water is not absorbed. This is now the main map from which we derive flood control service provision.
 ```{r, message = FALSE, results = 'hide', fig.height = 9}
 # identify max value
-max_value <- as.numeric(global(cnm2[[4]],fun = "max", na.rm=T))
+max_value <- as.numeric(global(cnms[[4]],fun = "max", na.rm=T))
 # create map
-potm <- max_value - cnm2[[4]]
+potm <- max_value - cnms[[4]]
 names(potm)<-"Pot_Runuff_Retention"
 # save
 writeRaster(potm,file.path(rfp,"runoff_retention.tif"),overwrite=T)
@@ -503,32 +510,34 @@ I therefore calculate Norway specific thresholds using the approach that the gui
 MM: I see the point of incorporating standard variation in the formula to calculate the thresholds, because this avoids inflated threholds when outliers inflate the mean, and it accounts for heterogeneity. Other than that, however, I am not sure whether this threshold-based definition of service provision comes with desirable properties. I suggest to discuss this further and check other sources than the EU guidance note.
 ```{r, message = FALSE, results = 'hide'}
 ## first on artificial
-artif_id<-c(1,141)
-spam_artif_am <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+artif_id<-c(100,111,112,121,130,131,132,133,134,135,141,142,152)
+spam_artif_am <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_artif_am[[1]]<-0
-spam_artif_am[is.na(lcm3)]<-NA
+spam_artif_am[is.na(lcm)]<-NA
 for(i in 1:length(artif_id)){
-  spam_artif_am[lcm4 == artif_id[i]]<-mean(potm[lcm4 == artif_id[i]],na.rm=T) + sd(potm[lcm4 == artif_id[i]],na.rm=T)
+  spam_artif_am[lcm == artif_id[i]]<-mean(potm[lcm == artif_id[i]],na.rm=T) + sd(potm[lcm == artif_id[i]],na.rm=T)
 }
-spa_tld_artif <- mean(spam_artif_am[lcm4 %in% artif_id],na.rm=T)
+spa_tld_artif <- mean(spam_artif_am[lcm %in% artif_id],na.rm=T)
+gc()
 ## then on agricultural
-agric_id<-c(241,231)
-spam_agric_am <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+agric_id<-c(200,310)
+spam_agric_am <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_agric_am[[1]]<-0
-spam_agric_am[is.na(lcm3)]<-NA
+spam_agric_am[is.na(lcm)]<-NA
 for(i in 1:length(agric_id)){
-  spam_agric_am[lcm4 == agric_id[i]]<-mean(potm[lcm4 == agric_id[i]],na.rm=T) + sd(potm[lcm4 == agric_id[i]],na.rm=T)
+  spam_agric_am[lcm == agric_id[i]]<-mean(potm[lcm == agric_id[i]],na.rm=T) + sd(potm[lcm == agric_id[i]],na.rm=T)
 }
-spa_tld_agric <- mean(spam_agric_am[lcm4 %in% agric_id],na.rm=T)
+spa_tld_agric <- mean(spam_agric_am[lcm %in% agric_id],na.rm=T)
+gc()
 ## then on natural
-natur_id<-c(321,312,311,313,322,333,332)
-spam_natur_am <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+natur_id<-c(320,400,410,420,440,520,600,611,623,720)
+spam_natur_am <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_natur_am[[1]]<-0
-spam_natur_am[is.na(lcm3)]<-NA
+spam_natur_am[is.na(lcm)]<-NA
 for(i in 1:length(natur_id)){
-  spam_natur_am[lcm4 == natur_id[i]]<-mean(potm[lcm4 == natur_id[i]],na.rm=T) - sd(potm[lcm4 == natur_id[i]],na.rm=T)
+  spam_natur_am[lcm == natur_id[i]]<-mean(potm[lcm == natur_id[i]],na.rm=T) - sd(potm[lcm == natur_id[i]],na.rm=T)
 }
-spa_tld_natur <- mean(spam_natur_am[lcm4 %in% natur_id],na.rm=T)
+spa_tld_natur <- mean(spam_natur_am[lcm %in% natur_id],na.rm=T)
 ## clean up
 rm(spam_artif_am,spam_agric_am,spam_natur_am)
 gc()
@@ -547,20 +556,20 @@ print(paste("Natural tld:",spa_tld_natur))
 Now given our thresholds we make a stack of maps for the SPAs
 ```{r, message = FALSE, results = 'hide', fig.height = 9}
 # Artificial spa
-spam_artif<-rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+spam_artif<-rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_artif[[1]]<-0
-spam_artif[is.na(lcm3)]<-NA
-spam_artif[lcm4 %in% artif_id & potm >= spa_tld_artif] <-1
+spam_artif[is.na(lcm)]<-NA
+spam_artif[lcm %in% artif_id & potm >= spa_tld_artif] <-1
 # Agricultural spa
-spam_agric<-rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+spam_agric<-rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_agric[[1]]<-0
-spam_agric[is.na(lcm3)]<-NA
-spam_agric[lcm4 %in% agric_id & potm >= spa_tld_agric] <-1
+spam_agric[is.na(lcm)]<-NA
+spam_agric[lcm %in% agric_id & potm >= spa_tld_agric] <-1
 # Natural spa
-spam_natur<-rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+spam_natur<-rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 spam_natur[[1]]<-0
-spam_natur[is.na(lcm3)]<-NA
-spam_natur[lcm4 %in% natur_id & potm >= spa_tld_natur] <-1
+spam_natur[is.na(lcm)]<-NA
+spam_natur[lcm %in% natur_id & potm >= spa_tld_natur] <-1
 # write raster
 writeRaster(spam_artif,file.path(rfp,"spam_artif.tif"),overwrite=T)
 writeRaster(spam_agric,file.path(rfp,"spam_agric.tif"),overwrite=T)
@@ -618,20 +627,20 @@ gc()
 Now it is literally just a question of identifying cells in the flood areas. And then plot results.
 ```{r, message = FALSE, results = 'hide', fig.height = 9}
 # service demand by population
-sdam_pop <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+sdam_pop <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 sdam_pop[[1]] <- 0
-sdam_pop[is.na(lcm3)]<-NA
+sdam_pop[is.na(lcm)]<-NA
 sdam_pop[flood == 1 & popr>0] <- popr[flood == 1 & popr>0]
 # service demand by artificial land
-sdam_artif <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+sdam_artif <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 sdam_artif[[1]] <- 0
-sdam_artif[is.na(lcm3)]<-NA
-sdam_artif[flood == 1 & lcm4 %in% artif_id] <- 1
+sdam_artif[is.na(lcm)]<-NA
+sdam_artif[flood == 1 & lcm %in% artif_id] <- 1
 # service demand by agricultural land
-sdam_agric <- rast(ext(lcm3),resolution=res(lcm3),crs=crs(lcm3))
+sdam_agric <- rast(ext(lcm),resolution=res(lcm),crs=crs(lcm))
 sdam_agric[[1]] <- 0
-sdam_agric[is.na(lcm3)]<-NA
-sdam_agric[flood == 1 & lcm4 %in% agric_id] <- 1
+sdam_agric[is.na(lcm)]<-NA
+sdam_agric[flood == 1 & lcm %in% agric_id] <- 1
 # aggregate to economic assets
 sdam_econ <- sdam_artif + sdam_agric
 # save
@@ -642,7 +651,7 @@ plot(sdam_econ,col=c("grey90","blue"),main = "Economic assets in flood risk")
 ccsdam<-data.frame(from=c(0,0.00001),to=c(0,Inf),col=c("grey90","blue"))
 plot(sdam_pop,col=ccsdam, main = "Population in flood risk")
 #clean up
-rm(lcm3,lcm4,popr,flood,ccsdam)
+rm(popr,flood,ccsdam)
 gc()
 ```
 
@@ -757,15 +766,14 @@ First we import elevation data and compute flow direction and flow accumulation 
 elev <- terra::rast(file.path(dfp,"version_2_2","inca_input_floodcontrol",
                               "DEM_and_Slope_maps",
                               "dt1_dem_INCA_EPSG3035_100m.tif"))
-elev<-crop(elev,lcm)
-elev<-mask(elev,lcm)
+elev<-crop(elev,lcm,mask=T)
 plot(elev,main="Norway Elevation")
 # then the computation
 set.seed(2025) # I do this for replicability. Flowdir allocates direction randomly when it is impossible to find a unique direction from the elevation data
 flowdir_total <- terra::terrain(elev,v="flowdir")
 # plot accumulation
 flow_acc_total <- terra::flowAccumulation((flowdir_total))
-plot(flow_acc_total, main = "Flow accumulation (number of cells upstream flowing into each cell, example Honefoss",ext = c(4325000,4345000,4105000,4125000),maxcell=ncell(lcm2))
+plot(flow_acc_total, main = "Flow accumulation (number of cells upstream flowing into each cell, example Honefoss",ext = c(4325000,4345000,4105000,4125000),maxcell=ncell(lcm))
 # clean up
 rm(elev)
 gc()
@@ -1438,15 +1446,17 @@ lev$es_id <- lcm_idf$es_id[
 lev$es_type <- lcm_idf$es_type[
   match(lev$Value, lcm_idf$landcover_id)
 ]
-lcm5<-lcm
-levels(lcm5) <- lev
+# make a new lcm followingh eustat categories
+lcme <- terra::classify(lcm, as.matrix(lev[, c("Value", "es_id")]))
+cats <- unique(na.omit(lev[, c("es_id", "es_type")]))
+names(cats)[1] <- "value"
+levels(lcme) <- cats
 # so here we can set which category we want to plot. 
 # Can always see which categories we have available by calling cats(lcm)
-activeCat(lcm5) <- "es_type"
+activeCat(lcme) <- "es_type"
 rm(lev)
-terra::plot(lcm5, main="Grunnkartet translated to SUT categories")
+terra::plot(lcme, main="Grunnkartet translated to SUT categories")
 # clean up
-rm(lcm2)
 gc()
 ```
 
@@ -1508,18 +1518,18 @@ sl<-list()
 for(n in 1:length(unique(n2shp$NUTS_ID))){
   sl[[n]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = n2shp[n2shp$NUTS_ID == unique(n2shp$NUTS_ID)[n],],
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
   sl[[n]]['region'] <- unique(n2shp$NUTS_ID)[n]
 }
 # add for total country
 ti<-length(sl)+1
 sl[[ti]]<-calc_es_flow_for_shp(estv=estv,
                                          maskshp = NULL,
-                                         reflcm = lcm5,
+                                         reflcm = lcme,
                                          totalflowm = flow_d_all_s_all,
-                                         refcnm = cnm2[[4]])
+                                         refcnm = cnms[[4]])
 sl[[ti]]['region'] <- "NO0"
 # reformat to our final supply table
 sdf<-do.call("rbind",sl) %>% pivot_wider(names_from = ecosystem,values_from = fc_flow) %>% arrange(region)
@@ -1530,7 +1540,7 @@ gc()
 Here is the supply table:
 ```{r}
 # print table
-kable(sdf)
+kable(sdf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 And then the use table. For the time being we only report total use and we assume it goes to households.
 ```{r, message = FALSE,results='hide'}
@@ -1546,7 +1556,7 @@ gc()
 ```
 Here is the table:
 ```{r}
-kable(udf)
+kable(udf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 ### 7.1.2 Based on continuous SPA
@@ -1558,18 +1568,18 @@ sl<-list()
 for(n in 1:length(unique(n2shp$NUTS_ID))){
   sl[[n]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = n2shp[n2shp$NUTS_ID == unique(n2shp$NUTS_ID)[n],],
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
   sl[[n]]['region'] <- unique(n2shp$NUTS_ID)[n]
 }
 # add for total country
 ti<-length(sl)+1
 sl[[ti]]<-calc_es_flow_for_shp(estv=estv,
                                          maskshp = NULL,
-                                         reflcm = lcm5,
+                                         reflcm = lcme,
                                          totalflowm = flow_d_econ_c,
-                                         refcnm = cnm2[[4]])
+                                         refcnm = cnms[[4]])
 sl[[ti]]['region'] <- "NO0"
 # reformat to our final supply table
 sdf<-do.call("rbind",sl) %>% pivot_wider(names_from = ecosystem,values_from = fc_flow) %>% arrange(region)
@@ -1580,7 +1590,7 @@ gc()
 Here is the supply table:
 ```{r}
 # print table
-kable(sdf)
+kable(sdf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 And then the use table. For the time being we only report total use and we assume it goes to households.
 ```{r, message = FALSE,results='hide'}
@@ -1596,7 +1606,7 @@ gc()
 ```
 Here is the table:
 ```{r}
-kable(udf)
+kable(udf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 
@@ -1610,51 +1620,51 @@ And here for our case study municipalities
 kl<-list()
 kl[[1]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = ahs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[1]]['region'] <- "Aurskog-Holand" 
 kl[[2]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = ehs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[2]]['region'] <- "Evje og Hornnes" 
 kl[[3]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = hos,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[3]]['region'] <- "Holtaalen" 
 kl[[4]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = mos,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[4]]['region'] <- "Moss" 
 kl[[5]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = nrs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[5]]['region'] <- "Nordreisa" 
 kl[[6]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = sds,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[6]]['region'] <- "Stad" 
 kl[[7]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = vrs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[7]]['region'] <- "Vardo" 
 kl[[8]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = vas,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_all_s_all,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[8]]['region'] <- "Vaagan" 
 # reformat to our final supply table
 kdf<-do.call("rbind",kl) %>% pivot_wider(names_from = ecosystem,values_from = fc_flow) %>% arrange(region)
@@ -1672,12 +1682,12 @@ gc()
 Here is the supply table:
 ```{r}
 # print table
-kable(kdf)
+kable(kdf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 And here is the use table:
 ```{r}
-kable(kudf)
+kable(kudf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 ### 7.2.2 Based on continuous SPA
@@ -1688,51 +1698,51 @@ And here for our case study municipalities
 kl<-list()
 kl[[1]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = ahs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[1]]['region'] <- "Aurskog-Holand" 
 kl[[2]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = ehs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[2]]['region'] <- "Evje og Hornnes" 
 kl[[3]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = hos,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[3]]['region'] <- "Holtaalen" 
 kl[[4]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = mos,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[4]]['region'] <- "Moss" 
 kl[[5]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = nrs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[5]]['region'] <- "Nordreisa" 
 kl[[6]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = sds,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[6]]['region'] <- "Stad" 
 kl[[7]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = vrs,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[7]]['region'] <- "Vardo" 
 kl[[8]]<-calc_es_flow_for_shp(estv=estv,
                                 maskshp = vas,
-                                reflcm = lcm5,
+                                reflcm = lcme,
                                 totalflowm = flow_d_econ_c,
-                                refcnm = cnm2[[4]])
+                                refcnm = cnms[[4]])
 kl[[8]]['region'] <- "Vaagan" 
 # reformat to our final supply table
 kdf<-do.call("rbind",kl) %>% pivot_wider(names_from = ecosystem,values_from = fc_flow) %>% arrange(region)
@@ -1745,18 +1755,17 @@ kudf <- kdf %>%
   mutate(`Gross capital formation` = NA) %>%
   mutate(Exports = NA)
 #clean up
-rm(lcm5)
 gc()
 ```
 Here is the supply table:
 ```{r}
 # print table
-kable(kdf)
+kable(kdf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 And here is the use table:
 ```{r}
-kable(kudf)
+kable(kudf %>% mutate(across(where(is.numeric), ~ round(.x, 2))))
 ```
 
 
