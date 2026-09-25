@@ -794,6 +794,7 @@ tmp<-tmp+1
 tmp[tmp==2]<-0
 # then compute restricted flow accummulation
 flow_acc_tmp <- terra::flowAccumulation(flowdir_total,tmp)
+gc()
 # then calculate the ratio
 ratio_artif<- 1 - flow_acc_tmp/flow_acc_total 
 # clean up
@@ -805,6 +806,7 @@ tmp<-tmp+1
 tmp[tmp==2]<-0
 # then compute restricted flow accummulation
 flow_acc_tmp <- terra::flowAccumulation(flowdir_total,tmp)
+gc()
 # then calculate the ratio
 ratio_agric<- 1 - flow_acc_tmp/flow_acc_total 
 # clean up
@@ -816,6 +818,7 @@ tmp<-tmp+1
 tmp[tmp==2]<-0
 # then compute restricted flow accummulation
 flow_acc_tmp <- terra::flowAccumulation(flowdir_total,tmp)
+gc()
 # then calculate the ratio
 ratio_natur<- 1 - flow_acc_tmp/flow_acc_total
 # clean up
@@ -827,6 +830,7 @@ tmp<- 1-(potm/100)
 tmp[is.na(tmp)]<-1
 # then restricted flow accumulation
 flow_acc_tmp <- terra::flowAccumulation(flowdir_total,tmp)
+gc()
 # then calculate the ratio
 ratio_contn <- 1 - flow_acc_tmp/flow_acc_total 
 # need to mask it so the sea becomes NA again
